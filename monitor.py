@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -14,8 +14,11 @@ MAPS = [
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 MESSAGE_FILE = "message_id.txt"
+WIB = ZoneInfo("Asia/Jakarta")
+UPDATE_INTERVAL_MINUTES = 5
+
 session = requests.Session()
-session.headers.update({"User-Agent": "B2F-MAP-LIVE/1.2"})
+session.headers.update({"User-Agent": "B2F-MAP-LIVE/1.3"})
 
 
 def get_experience_players(place_id):
@@ -73,10 +76,7 @@ def get_public_servers(place_id):
         time.sleep(0.15)
 
     experience_players = get_experience_players(place_id)
-    if experience_players is None:
-        players = listed_players
-    else:
-        players = max(experience_players, listed_players)
+    players = listed_players if experience_players is None else max(experience_players, listed_players)
 
     print(
         f"Place {place_id}: experience={experience_players}, "
@@ -85,12 +85,21 @@ def get_public_servers(place_id):
     return players, server_count, bool(cursor)
 
 
+def get_update_times():
+    """Return current WIB time and next approximate 5-minute schedule slot."""
+    now = datetime.now(WIB).replace(second=0, microsecond=0)
+    minutes_to_next = UPDATE_INTERVAL_MINUTES - (now.minute % UPDATE_INTERVAL_MINUTES)
+    next_update = now + timedelta(minutes=minutes_to_next)
+    return now, next_update
+
+
 def make_payload(results):
     total_players = sum(item["players"] for item in results)
     total_servers = sum(item["servers"] for item in results)
 
-    # Timestamp is generated in Asia/Jakarta, independent of GitHub runner timezone.
-    updated = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%d %b %Y • %H:%M:%S WIB")
+    updated_at, next_update = get_update_times()
+    updated_text = updated_at.strftime("%d %b %Y • %H:%M WIB")
+    next_text = next_update.strftime("%d %b %Y • %H:%M WIB")
 
     sections = []
     for item in results:
@@ -114,7 +123,12 @@ def make_payload(results):
             "title": "🗺️ B2F MAP LIVE — ROBLOX LIVE MONITOR",
             "description": description,
             "color": 0xF48FB1,
-            "footer": {"text": f"Update terakhir • {updated}"},
+            "footer": {
+                "text": (
+                    f"Update terakhir • {updated_text}\n"
+                    f"Update selanjutnya • sekitar {next_text}"
+                )
+            },
         }],
         "allowed_mentions": {"parse": []},
     }
