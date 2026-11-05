@@ -14,10 +14,11 @@ MAPS = [
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 MESSAGE_FILE = "message_id.txt"
 session = requests.Session()
-session.headers.update({"User-Agent": "B2F-MAP-LIVE/1.0"})
+session.headers.update({"User-Agent": "B2F-MAP-LIVE/1.1"})
 
 
-def get_players(place_id, fallback):
+def get_experience_players(place_id):
+    """Read Roblox's experience-wide current player count using the Place ID."""
     try:
         r = session.get(
             f"https://apis.roblox.com/universes/v1/places/{place_id}/universe",
@@ -25,6 +26,7 @@ def get_players(place_id, fallback):
         )
         r.raise_for_status()
         universe_id = r.json()["universeId"]
+
         r = session.get(
             "https://games.roblox.com/v1/games",
             params={"universeIds": universe_id},
@@ -32,17 +34,18 @@ def get_players(place_id, fallback):
         )
         r.raise_for_status()
         games = r.json().get("data", [])
-        if games:
-            return int(games[0].get("playing", fallback))
+        if games and games[0].get("playing") is not None:
+            return int(games[0]["playing"])
     except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
-        print(f"Player stats fallback for {place_id}: {exc}")
-    return fallback
+        print(f"Experience player API failed for {place_id}: {exc}")
+    return None
 
 
 def get_public_servers(place_id):
+    """Count listed public servers and sum their player counts."""
     cursor = None
     seen = set()
-    players_in_list = 0
+    listed_players = 0
     server_count = 0
     pages = 0
 
@@ -50,46 +53,67 @@ def get_public_servers(place_id):
         params = {"sortOrder": "Asc", "limit": 100}
         if cursor:
             params["cursor"] = cursor
+
         r = session.get(
             f"https://games.roblox.com/v1/games/{place_id}/servers/Public",
             params=params,
             timeout=25,
         )
         r.raise_for_status()
-        data = r.json()
-        for server in data.get("data", []):
-            sid = server.get("id")
-            if sid and sid not in seen:
-                seen.add(sid)
+        payload = r.json()
+
+        for server in payload.get("data", []):
+            server_id = server.get("id")
+            if server_id and server_id not in seen:
+                seen.add(server_id)
                 server_count += 1
-                players_in_list += int(server.get("playing", 0))
-        cursor = data.get("nextPageCursor")
+                listed_players += int(server.get("playing") or 0)
+
+        cursor = payload.get("nextPageCursor")
         pages += 1
         if not cursor:
             break
         time.sleep(0.15)
 
-    return get_players(place_id, players_in_list), server_count, bool(cursor)
+    experience_players = get_experience_players(place_id)
+
+    # Never let a zero/stale experience response hide players already visible
+    # in the public-server listing. Use whichever count is higher.
+    if experience_players is None:
+        players = listed_players
+        source = "jumlah pemain dari daftar server publik"
+    else:
+        players = max(experience_players, listed_players)
+        source = "statistik experience / daftar server publik"
+
+    print(
+        f"Place {place_id}: experience={experience_players}, "
+        f"listed={listed_players}, selected={players}, servers={server_count}"
+    )
+    return players, server_count, bool(cursor), source
 
 
 def make_payload(results):
-    total_players = sum(x["players"] for x in results)
-    total_servers = sum(x["servers"] for x in results)
+    total_players = sum(item["players"] for item in results)
+    total_servers = sum(item["servers"] for item in results)
     updated = datetime.now(timezone.utc).strftime("%d %b %Y • %H:%M UTC")
+
     sections = []
     for item in results:
-        capped = " *(hasil pagination dibatasi)*" if item["capped"] else ""
+        warning = " *(hasil pemindaian server dibatasi API)*" if item["capped"] else ""
         sections.append(
             f"**[{item['name']}]({item['url']})**\n"
             f"👥 Pemain online: **{item['players']}**\n"
-            f"🖥️ Server publik terpantau: **{item['servers']}**{capped}"
+            f"🖥️ Server publik terpantau: **{item['servers']}**{warning}"
         )
+
     description = "\n\n".join(sections)
     description += (
         f"\n\n━━━━━━━━━━━━━━━━━━━━\n"
         f"👥 **TOTAL PEMAIN: {total_players}**\n"
         f"🖥️ **TOTAL SERVER TERPANTAU: {total_servers}**"
     )
+
     return {
         "username": "B2F MAP LIVE",
         "embeds": [{
@@ -106,25 +130,37 @@ def post_or_edit(payload):
     message_id = None
     if Path(MESSAGE_FILE).exists():
         message_id = Path(MESSAGE_FILE).read_text(encoding="utf-8").strip() or None
+
     if message_id:
-        r = session.patch(f"{WEBHOOK}/messages/{message_id}", json=payload, timeout=25)
+        r = session.patch(
+            f"{WEBHOOK}/messages/{message_id}",
+            json=payload,
+            timeout=25,
+        )
         if r.status_code != 404:
             r.raise_for_status()
-            print("Discord monitor message updated.")
+            print(f"Updated Discord message {message_id}")
             return
+
     r = session.post(WEBHOOK + "?wait=true", json=payload, timeout=25)
     r.raise_for_status()
     new_id = r.json()["id"]
     Path(MESSAGE_FILE).write_text(new_id, encoding="utf-8")
-    print("Discord monitor message created.")
+    print(f"Created Discord message {new_id}")
 
 
 def main():
     results = []
     for game in MAPS:
         print(f"Checking {game['name']}...")
-        players, servers, capped = get_public_servers(game["place_id"])
-        results.append({**game, "players": players, "servers": servers, "capped": capped})
+        players, servers, capped, source = get_public_servers(game["place_id"])
+        results.append({
+            **game,
+            "players": players,
+            "servers": servers,
+            "capped": capped,
+            "source": source,
+        })
     post_or_edit(make_payload(results))
 
 
