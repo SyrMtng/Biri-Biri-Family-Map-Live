@@ -1,7 +1,8 @@
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -14,11 +15,10 @@ MAPS = [
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 MESSAGE_FILE = "message_id.txt"
 session = requests.Session()
-session.headers.update({"User-Agent": "B2F-MAP-LIVE/1.1"})
+session.headers.update({"User-Agent": "B2F-MAP-LIVE/1.2"})
 
 
 def get_experience_players(place_id):
-    """Read Roblox's experience-wide current player count using the Place ID."""
     try:
         r = session.get(
             f"https://apis.roblox.com/universes/v1/places/{place_id}/universe",
@@ -26,7 +26,6 @@ def get_experience_players(place_id):
         )
         r.raise_for_status()
         universe_id = r.json()["universeId"]
-
         r = session.get(
             "https://games.roblox.com/v1/games",
             params={"universeIds": universe_id},
@@ -42,7 +41,6 @@ def get_experience_players(place_id):
 
 
 def get_public_servers(place_id):
-    """Count listed public servers and sum their player counts."""
     cursor = None
     seen = set()
     listed_players = 0
@@ -53,7 +51,6 @@ def get_public_servers(place_id):
         params = {"sortOrder": "Asc", "limit": 100}
         if cursor:
             params["cursor"] = cursor
-
         r = session.get(
             f"https://games.roblox.com/v1/games/{place_id}/servers/Public",
             params=params,
@@ -76,27 +73,24 @@ def get_public_servers(place_id):
         time.sleep(0.15)
 
     experience_players = get_experience_players(place_id)
-
-    # Never let a zero/stale experience response hide players already visible
-    # in the public-server listing. Use whichever count is higher.
     if experience_players is None:
         players = listed_players
-        source = "jumlah pemain dari daftar server publik"
     else:
         players = max(experience_players, listed_players)
-        source = "statistik experience / daftar server publik"
 
     print(
         f"Place {place_id}: experience={experience_players}, "
         f"listed={listed_players}, selected={players}, servers={server_count}"
     )
-    return players, server_count, bool(cursor), source
+    return players, server_count, bool(cursor)
 
 
 def make_payload(results):
     total_players = sum(item["players"] for item in results)
     total_servers = sum(item["servers"] for item in results)
-    updated = datetime.now(timezone.utc).strftime("%d %b %Y • %H:%M UTC")
+
+    # Timestamp is generated in Asia/Jakarta, independent of GitHub runner timezone.
+    updated = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%d %b %Y • %H:%M:%S WIB")
 
     sections = []
     for item in results:
@@ -120,7 +114,7 @@ def make_payload(results):
             "title": "🗺️ B2F MAP LIVE — ROBLOX LIVE MONITOR",
             "description": description,
             "color": 0xF48FB1,
-            "footer": {"text": f"Update otomatis • {updated}"},
+            "footer": {"text": f"Update terakhir • {updated}"},
         }],
         "allowed_mentions": {"parse": []},
     }
@@ -132,11 +126,7 @@ def post_or_edit(payload):
         message_id = Path(MESSAGE_FILE).read_text(encoding="utf-8").strip() or None
 
     if message_id:
-        r = session.patch(
-            f"{WEBHOOK}/messages/{message_id}",
-            json=payload,
-            timeout=25,
-        )
+        r = session.patch(f"{WEBHOOK}/messages/{message_id}", json=payload, timeout=25)
         if r.status_code != 404:
             r.raise_for_status()
             print(f"Updated Discord message {message_id}")
@@ -153,13 +143,12 @@ def main():
     results = []
     for game in MAPS:
         print(f"Checking {game['name']}...")
-        players, servers, capped, source = get_public_servers(game["place_id"])
+        players, servers, capped = get_public_servers(game["place_id"])
         results.append({
             **game,
             "players": players,
             "servers": servers,
             "capped": capped,
-            "source": source,
         })
     post_or_edit(make_payload(results))
 
